@@ -1,51 +1,49 @@
 /**
- * Midnight Circus — backend exemplo com storage remoto + validação da senha da equipe.
+ * Midnight Circus — backend Render + Supabase
  *
- * Como usar:
- *   npm init -y
- *   npm install express cors
+ * Variáveis de ambiente obrigatórias no Render:
+ *   SUPABASE_URL=https://xxxx.supabase.co
+ *   SUPABASE_SERVICE_ROLE_KEY=sua_service_role_key
+ *   TEAM_PASSWORD=CIRCUS170326
+ *   SITE_ORIGIN=https://midnightcirc.us
  *
- *   # recomendado em produção:
- *   TEAM_PASSWORD='CIRCUS170326' SITE_ORIGIN='https://seu-site.com' node midnight-circus-server-auth-example.js
+ * O front-end pode usar baseUrl sem /api:
+ *   https://midnight-circus-api.onrender.com
  *
- *   # para teste local, o backend usa CIRCUS170326 se TEAM_PASSWORD não estiver definido.
- *   node midnight-circus-server-auth-example.js
- *
- * Depois, no HTML, troque:
- *   SERVER_STORAGE_CONFIG.baseUrl = 'https://SEU-SERVIDOR.com/api'
- * por:
- *   SERVER_STORAGE_CONFIG.baseUrl = 'https://seu-dominio-ou-api.com/api'
- *
- * Observações importantes:
- * - A senha da equipe é validada aqui no servidor, não no HTML.
- * - Não publique a senha em repositório público. Em produção, use variável de ambiente TEAM_PASSWORD.
- * - Este exemplo salva JSON em disco. Para uso real, prefira banco de dados e autenticação robusta.
+ * Este servidor também aceita rotas com /api para compatibilidade:
+ *   /api/auth/login, /api/storage/...
  */
 
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs/promises');
-const path = require('path');
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const TEAM_PASSWORD = process.env.TEAM_PASSWORD || 'CIRCUS170326';
 const DEFAULT_SITE_ID = process.env.SITE_ID || 'midnight-circus';
+const SITE_ORIGIN = process.env.SITE_ORIGIN || true;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-app.use(express.json({ limit: '25mb' }));
-app.use(cors({
-  origin: process.env.SITE_ORIGIN || true,
-  credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-function safeName(value) {
-  const cleaned = String(value || '').replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!cleaned) throw new Error('Nome inválido');
-  return cleaned;
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('[Midnight Circus] SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurado. Configure no Render.');
 }
+
+const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    })
+  : null;
+
+app.use(express.json({ limit: '35mb' }));
+app.use(cors({
+  origin: SITE_ORIGIN,
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'OPTIONS']
+}));
 
 function normalizeUsername(value) {
   return String(value || '')
@@ -56,75 +54,21 @@ function normalizeUsername(value) {
     .slice(0, 24);
 }
 
-async function collectionPath(siteId, collection) {
-  const safeSite = safeName(siteId || DEFAULT_SITE_ID);
-  const safeCollection = safeName(collection);
-  const dir = path.join(DATA_DIR, safeSite);
-  await fs.mkdir(dir, { recursive: true });
-  return path.join(dir, `${safeCollection}.json`);
-}
-
-async function readCollection(siteId, collection, defaultData) {
-  const file = await collectionPath(siteId, collection);
-  const raw = await fs.readFile(file, 'utf8').catch(() => null);
-  if (!raw) return { data: defaultData, updatedAt: null };
-  const parsed = JSON.parse(raw);
-  if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'data')) return parsed;
-  return { data: parsed, updatedAt: null };
-}
-
-async function writeCollection(siteId, collection, data) {
-  const file = await collectionPath(siteId, collection);
-  const payload = { data, updatedAt: new Date().toISOString() };
-  await fs.writeFile(file, JSON.stringify(payload, null, 2), 'utf8');
-  return payload;
-}
-
-async function readAccounts() {
-  const payload = await readCollection(DEFAULT_SITE_ID, 'accounts', {});
-  return payload.data || {};
-}
-
-async function writeAccounts(accounts) {
-  return writeCollection(DEFAULT_SITE_ID, 'accounts', accounts || {});
-}
-
-async function readSessions() {
-  const payload = await readCollection(DEFAULT_SITE_ID, 'sessions', {});
-  return payload.data || {};
-}
-
-async function writeSessions(sessions) {
-  return writeCollection(DEFAULT_SITE_ID, 'sessions', sessions || {});
-}
-
-async function createSession(username) {
-  const sessions = await readSessions();
-  const token = crypto.randomBytes(32).toString('hex');
-  sessions[token] = {
-    username,
-    createdAt: new Date().toISOString()
-  };
-  await writeSessions(sessions);
-  return token;
-}
-
-async function getSessionFromRequest(req) {
-  const authHeader = req.get('Authorization') || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-  if (!token) return null;
-  const sessions = await readSessions();
-  const session = sessions[token];
-  return session ? { token, ...session } : null;
-}
-
 function publicAccount(account) {
   if (!account) return null;
   return {
     username: account.username,
-    displayName: account.displayName || account.username,
-    createdAt: account.createdAt
+    displayName: account.display_name || account.displayName || account.username,
+    createdAt: account.created_at || account.createdAt || null
   };
+}
+
+function requireSupabase() {
+  if (!supabase) {
+    const err = new Error('Supabase não configurado no servidor. Configure SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no Render.');
+    err.status = 500;
+    throw err;
+  }
 }
 
 function requireTeamPassword(teamPassword) {
@@ -135,12 +79,43 @@ function requireTeamPassword(teamPassword) {
   }
 }
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'midnight-circus-storage-auth' });
-});
+async function getSessionFromRequest(req) {
+  requireSupabase();
+  const authHeader = req.get('Authorization') || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!token) return null;
 
-app.post('/api/auth/register', async (req, res) => {
+  const { data, error } = await supabase
+    .from('mc_sessions')
+    .select('token, username, created_at')
+    .eq('token', token)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+async function createSession(username) {
+  requireSupabase();
+  const token = crypto.randomBytes(32).toString('hex');
+  const { error } = await supabase
+    .from('mc_sessions')
+    .insert({ token, username });
+  if (error) throw error;
+  return token;
+}
+
+async function handleHealth(_req, res) {
+  res.json({
+    ok: true,
+    service: 'midnight-circus-supabase-api',
+    storage: supabase ? 'supabase' : 'not-configured'
+  });
+}
+
+async function handleRegister(req, res) {
   try {
+    requireSupabase();
     const username = normalizeUsername(req.body?.username);
     const displayName = String(req.body?.displayName || username).trim().slice(0, 32);
     const teamPassword = String(req.body?.teamPassword || '');
@@ -151,111 +126,181 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Usuário precisa ter pelo menos 3 caracteres válidos.' });
     }
 
-    const accounts = await readAccounts();
-    if (accounts[username]) {
-      return res.status(409).json({ error: 'Esse usuário já existe. Escolha outro.' });
-    }
+    const { data: existing, error: existingError } = await supabase
+      .from('mc_accounts')
+      .select('username')
+      .eq('username', username)
+      .maybeSingle();
 
-    const account = {
+    if (existingError) throw existingError;
+    if (existing) return res.status(409).json({ error: 'Esse usuário já existe. Escolha outro.' });
+
+    const accountRow = {
       username,
-      displayName: displayName || username,
-      createdAt: new Date().toISOString()
+      display_name: displayName || username
     };
 
-    accounts[username] = account;
-    await writeAccounts(accounts);
+    const { data: account, error: insertError } = await supabase
+      .from('mc_accounts')
+      .insert(accountRow)
+      .select('username, display_name, created_at')
+      .single();
+
+    if (insertError) throw insertError;
 
     const token = await createSession(username);
     res.json({ ok: true, account: publicAccount(account), token });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Erro ao criar conta.' });
   }
-});
+}
 
-app.post('/api/auth/login', async (req, res) => {
+async function handleLogin(req, res) {
   try {
+    requireSupabase();
     const username = normalizeUsername(req.body?.username);
     const teamPassword = String(req.body?.teamPassword || '');
 
     requireTeamPassword(teamPassword);
 
-    const accounts = await readAccounts();
-    const account = accounts[username];
-    if (!account) {
-      return res.status(401).json({ error: 'Usuário ou senha da equipe incorretos.' });
-    }
+    const { data: account, error } = await supabase
+      .from('mc_accounts')
+      .select('username, display_name, created_at')
+      .eq('username', username)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!account) return res.status(401).json({ error: 'Usuário ou senha da equipe incorretos.' });
 
     const token = await createSession(username);
     res.json({ ok: true, account: publicAccount(account), token });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'Erro ao entrar.' });
   }
-});
+}
 
-app.post('/api/auth/logout', async (req, res) => {
+async function handleLogout(req, res) {
   try {
+    requireSupabase();
     const token = String(req.body?.token || '').trim();
     if (token) {
-      const sessions = await readSessions();
-      delete sessions[token];
-      await writeSessions(sessions);
+      const { error } = await supabase
+        .from('mc_sessions')
+        .delete()
+        .eq('token', token);
+      if (error) throw error;
     }
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: err.message || 'Erro ao sair.' });
+    res.status(err.status || 500).json({ error: err.message || 'Erro ao sair.' });
   }
-});
+}
 
-app.get('/api/storage/:siteId/:collection', async (req, res) => {
+function defaultCollectionData(collection) {
+  return collection === 'accounts' || collection === 'sessions' ? {} : [];
+}
+
+async function handleGetStorage(req, res) {
   try {
-    const collection = req.params.collection;
-    const defaultData = collection === 'accounts' || collection === 'sessions' ? {} : [];
+    requireSupabase();
+    const siteId = String(req.params.siteId || DEFAULT_SITE_ID);
+    const collection = String(req.params.collection || '');
 
     if (collection === 'sessions') {
       return res.status(403).json({ error: 'Coleção protegida.' });
     }
 
-    const payload = await readCollection(req.params.siteId, collection, defaultData);
-
-    // Nunca exponha dados sensíveis. Atualmente accounts só contém dados públicos.
+    // Compatibilidade: se o front pedir accounts, devolve uma versão pública.
     if (collection === 'accounts') {
+      const { data, error } = await supabase
+        .from('mc_accounts')
+        .select('username, display_name, created_at')
+        .order('created_at', { ascending: true });
+      if (error) throw error;
       const publicAccounts = {};
-      for (const [username, account] of Object.entries(payload.data || {})) {
-        publicAccounts[username] = publicAccount(account);
+      for (const account of data || []) {
+        publicAccounts[account.username] = publicAccount(account);
       }
-      return res.json({ data: publicAccounts, updatedAt: payload.updatedAt });
+      return res.json({ data: publicAccounts, updatedAt: null });
     }
 
-    res.json(payload);
+    const { data, error } = await supabase
+      .from('mc_storage')
+      .select('data, updated_at')
+      .eq('site_id', siteId)
+      .eq('collection', collection)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    res.json({
+      data: data?.data ?? defaultCollectionData(collection),
+      updatedAt: data?.updated_at || null
+    });
   } catch (err) {
-    res.status(400).json({ error: err.message || 'Erro ao carregar coleção.' });
+    res.status(err.status || 400).json({ error: err.message || 'Erro ao carregar coleção.' });
   }
-});
+}
 
-app.put('/api/storage/:siteId/:collection', async (req, res) => {
+async function handlePutStorage(req, res) {
   try {
-    const collection = req.params.collection;
+    requireSupabase();
+    const siteId = String(req.params.siteId || DEFAULT_SITE_ID);
+    const collection = String(req.params.collection || '');
 
-    // accounts/sessions são controlados pelos endpoints /auth.
     if (collection === 'accounts' || collection === 'sessions') {
-      return res.status(403).json({ error: 'Coleção protegida. Use /api/auth.' });
+      return res.status(403).json({ error: 'Coleção protegida. Use /auth.' });
     }
 
     const session = await getSessionFromRequest(req);
-    if (!session) {
-      return res.status(401).json({ error: 'Login necessário para salvar dados no servidor.' });
-    }
+    if (!session) return res.status(401).json({ error: 'Login necessário para salvar dados no servidor.' });
 
-    const payload = await writeCollection(req.params.siteId, collection, req.body?.data);
-    res.json({ ok: true, updatedAt: payload.updatedAt, user: session.username });
+    const dataToSave = req.body?.data ?? defaultCollectionData(collection);
+    const updatedAt = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from('mc_storage')
+      .upsert({
+        site_id: siteId,
+        collection,
+        data: dataToSave,
+        updated_at: updatedAt
+      }, { onConflict: 'site_id,collection' })
+      .select('updated_at')
+      .single();
+
+    if (error) throw error;
+
+    res.json({ ok: true, updatedAt: data?.updated_at || updatedAt, user: session.username });
   } catch (err) {
-    res.status(400).json({ error: err.message || 'Erro ao salvar coleção.' });
+    res.status(err.status || 400).json({ error: err.message || 'Erro ao salvar coleção.' });
   }
+}
+
+// Rotas sem /api, compatíveis com seu HTML atual.
+app.get('/health', handleHealth);
+app.post('/auth/register', handleRegister);
+app.post('/auth/login', handleLogin);
+app.post('/auth/logout', handleLogout);
+app.get('/storage/:siteId/:collection', handleGetStorage);
+app.put('/storage/:siteId/:collection', handlePutStorage);
+
+// Rotas com /api, para compatibilidade com versões antigas do HTML.
+app.get('/api/health', handleHealth);
+app.post('/api/auth/register', handleRegister);
+app.post('/api/auth/login', handleLogin);
+app.post('/api/auth/logout', handleLogout);
+app.get('/api/storage/:siteId/:collection', handleGetStorage);
+app.put('/api/storage/:siteId/:collection', handlePutStorage);
+
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Rota não encontrada.' });
 });
 
 app.listen(PORT, () => {
-  console.log(`Midnight Circus API rodando em http://localhost:${PORT}/api`);
+  console.log(`Midnight Circus API rodando na porta ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health ou /api/health`);
   if (!process.env.TEAM_PASSWORD) {
-    console.warn('Aviso: TEAM_PASSWORD não definido. Usando senha padrão de teste: CIRCUS170326');
+    console.warn('Aviso: TEAM_PASSWORD não definido. Usando senha padrão: CIRCUS170326');
   }
 });
